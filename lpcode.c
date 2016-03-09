@@ -394,7 +394,7 @@ static int needfollow (TTree *tree) {
     case TSeq:
       tree = sib2(tree); goto tailcall;
     default: assert(0); return 0;
-  } 
+  }
 }
 
 /* }====================================================== */
@@ -680,7 +680,7 @@ static void codechoice (CompileState *compst, TTree *p1, TTree *p2, int opt,
     int jmp = NOINST;
     codegen(compst, p1, 0, test, fl);
     if (!emptyp2)
-      jmp = addoffsetinst(compst, IJmp); 
+      jmp = addoffsetinst(compst, IJmp);
     jumptohere(compst, test);
     codegen(compst, p2, opt, NOINST, fl);
     jumptohere(compst, jmp);
@@ -691,7 +691,7 @@ static void codechoice (CompileState *compst, TTree *p1, TTree *p2, int opt,
     codegen(compst, p1, 1, NOINST, fullset);
   }
   else {
-    /* <p1 / p2> == 
+    /* <p1 / p2> ==
         test(first(p1)) -> L1; choice L1; <p1>; commit L2; L1: <p2>; L2: */
     int pcommit;
     int test = codetestset(compst, &cs1, e1);
@@ -972,7 +972,7 @@ static void coderep (CompileState *compst, TTree *tree, int opt,
       /* L1: test (fail(p1)) -> L2; <p>; jmp L1; L2: */
       int jmp;
       int test = codetestset(compst, &st, 0);
-#idef LPEG_OPTIMIZE
+#ifdef LPEG_OPTIMIZE
       codegen(compst, tree, opt, test, fullset);
 #else
       codegen(compst, tree, 0, test, fullset);
@@ -1204,4 +1204,3 @@ Instruction *compile (lua_State *L, Pattern *p) {
 
 
 /* }====================================================== */
-

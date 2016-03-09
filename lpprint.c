@@ -89,7 +89,7 @@ void printinst (const Instruction *op, const Instruction *p) {
       printf("'%c'", p->i.aux); printjmp(op, p);
       break;
     }
-#idef LPEG_OPTIMIZE
+#ifdef LPEG_OPTIMIZE
     case ITestVector: {
       printvjmp(op, p);
       break;
