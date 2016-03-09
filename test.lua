@@ -1,4 +1,4 @@
-#!/usr/bin/env lua5.1
+#!/usr/bin/env lua
 
 -- $Id: test.lua,v 1.101 2013/04/12 16:30:33 roberto Exp $
 
@@ -282,7 +282,7 @@ assert(m.match(m.P"ab"^-1 - "c", "abcd") == 3)
 
 p = ('Aa' * ('Bb' * ('Cc' * m.P'Dd'^0)^0)^0)^-1
 assert(p:match("AaBbCcDdBbCcDdDdDdBb") == 21)
- 
+
 
 pi = "3.14159 26535 89793 23846 26433 83279 50288 41971 69399 37510"
 assert(m.match(m.Cs((m.P"1" / "a" + m.P"5" / "b" + m.P"9" / "c" + 1)^0), pi) ==
@@ -763,7 +763,7 @@ s = string.rep('a', l) .. string.rep('b', l) .. string.rep('c', l)
 p = (m.C(m.P'a'^1) * m.C(m.P'b'^1) * m.C(m.P'c'^1)) / '%3%2%1'
 
 assert(p:match(s) == string.rep('c', l) ..
-                     string.rep('b', l) .. 
+                     string.rep('b', l) ..
                      string.rep('a', l))
 
 print"+"
@@ -948,8 +948,8 @@ assert(#x == 500)
 local function id(s, i, x)
   if x == 'a' then return i, 1, 3, 7
   else return nil, 2, 4, 6, 8
-  end   
-end     
+  end
+end
 
 p = ((m.P(id) * 1 + m.Cmt(2, id) * 1  + m.Cmt(1, id) * 1))^0
 assert(table.concat{p:match('abababab')} == string.rep('137', 4))
@@ -1047,7 +1047,7 @@ checkeq(t, {'a', 'aa', 20, 'a', 'aaa', 'aaa'})
 -- Tests for 're' module
 -------------------------------------------------------------------
 
-local re = require "re"
+local re = require "re-labels"
 
 local match, compile = re.match, re.compile
 
@@ -1380,7 +1380,82 @@ errmsg('b <- a', 'undefined')
 errmsg("x <- 'a'  x <- 'b'", 'already defined')
 errmsg("'a' -", "near '-'")
 
+-- testing farthest fail position
+
+-- simple tests
+
+assert(m.match(m.P("a")^1 * -any, "ab") == nil,2)
+assert(m.match(m.P("a")^1 * -any, "ab", 1) == nil,2)
+assert(m.match(m.P("a")^1 * -any, "ab", 2) == nil,2)
+assert(m.match(m.P("a")^1 * -any, "ab", 3) == nil,2)
+assert(m.match(m.P("a")^1 * -any, "ab", 0) == nil,2)
+assert(m.match(m.P("a")^1 * -any, "ab", -1) == nil,2)
+assert(m.match(m.P("a")^1 * -any, "ab", -2) == nil,2)
+assert(m.match(m.P("a")^1 * -any, "ab", -3) == nil,2)
+
+-- grammar tests
+
+m.locale(m)
+
+local function token(pat)
+  return pat * m.V"Skip"
+end
+
+local function symb(str)
+  return token(m.P(str))
+end
+
+local function kw(str)
+  return token(m.P(str) * -m.V"idRest")
+end
+
+g = m.P { m.V"Tiny",
+  -- parser
+  Tiny = m.V"Skip" * m.V"CmdSeq" * -any;
+  CmdSeq = m.V"Cmd" * symb(";") * (m.V"Cmd" * symb(";"))^0;
+  Cmd = m.V"IfCmd" + m.V"RepeatCmd" + m.V"AssignCmd" +
+        m.V"ReadCmd" + m.V"WriteCmd";
+  IfCmd = kw("if") * m.V"Exp" * kw("then") * m.V"CmdSeq" *
+          (kw("else") * m.V"CmdSeq")^-1 * kw("end");
+  RepeatCmd = kw("repeat") * m.V"CmdSeq" * kw("until") * m.V"Exp";
+  AssignCmd = token(m.V"Name","Name") * symb(":=") * m.V"Exp";
+  ReadCmd = kw("read") * token(m.V"Name","Name");
+  WriteCmd = kw("write") * m.V"Exp";
+  Exp = m.V"SimpleExp" * (m.V"RelOp" * m.V"SimpleExp")^-1;
+  SimpleExp = m.V"Term" * (m.V"AddOp" * m.V"Term")^0;
+  Term = m.V"Factor" * (m.V"MulOp" * m.V"Factor")^0;
+  Factor = symb("(") * m.V"Exp" * symb(")") +
+           token(m.V"Number","Number") +
+           token(m.V"Name","Name");
+  -- lexer
+  Space = m.space^1;
+  Comment = m.P"//" * (any - m.P"\n")^0;
+  Skip = (m.V"Space" + m.V"Comment")^0;
+  idStart = m.alpha + m.P"_";
+  idRest = m.alnum + m.P"_";
+  Keywords = m.P"if" + "then" + "else" + "end" +
+              "repeat" + "until" + "read" + "write";
+  Reserved = m.V"Keywords" * -m.V"idRest";
+  Identifier = m.V"idStart" * m.V"idRest"^0;
+  Name = -m.V"Reserved" * m.V"Identifier" * -m.V"idRest";
+  Number = m.digit^1;
+  RelOp = symb("<") + symb("=");
+  AddOp = symb("+") + symb("-");
+  MulOp = symb("*") + symb("/");
+}
+
+p = [[
+n := 5;
+f := 1;
+repeat
+  f := f * n;
+  n := n - 1
+until (n < 1);
+write f;
+]]
+
+assert(m.match(g, p) == nil,51)
+
+print"+"
 
 print"OK"
-
-
