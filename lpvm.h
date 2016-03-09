@@ -1,5 +1,5 @@
 /*
-** $Id: lpvm.h,v 1.2 2013/04/03 20:37:18 roberto Exp $
+** $Id: lpvm.h,v 1.3 2014/02/21 13:06:41 roberto Exp $
 */
 
 #if !defined(lpvm_h)
@@ -16,6 +16,7 @@ typedef enum Opcode {
   ITestAny,  /* in no char, jump to 'offset' */
   ITestChar,  /* if char != aux, jump to 'offset' */
   ITestSet,  /* if char not in buff, jump to 'offset' */
+  ITestVector, /* if char is in buff, then jump to to associated dest; otherwise, jump to 'offset' */
   ISpan,  /* read a span of chars in buff */
   IBehind,  /* walk back 'aux' characters (fail if not possible) */
   IRet,  /* return from a rule */
@@ -49,14 +50,9 @@ typedef union Instruction {
 } Instruction;
 
 
-int getposition (lua_State *L, int t, int i);
 void printpatt (Instruction *p, int n);
 const char *match (lua_State *L, const char *o, const char *s, const char *e,
                    Instruction *op, Capture *capture, int ptop);
-int verify (lua_State *L, Instruction *op, const Instruction *p,
-            Instruction *e, int postable, int rule);
-void checkrule (lua_State *L, Instruction *op, int from, int to,
-                int postable, int rule);
 
 
 #endif

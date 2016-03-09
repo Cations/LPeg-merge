@@ -1,7 +1,7 @@
 /*
-** $Id: lptypes.h,v 1.8 2013/04/12 16:26:38 roberto Exp $
+** $Id: lptypes.h,v 1.11 2015/03/04 16:38:00 roberto Exp $
 ** LPeg - PEG pattern matching for Lua
-** Copyright 2007, Lua.org & PUC-Rio  (see 'lpeg.html' for license)
+** Copyright 2007-2014, Lua.org & PUC-Rio  (see 'lpeg.html' for license)
 ** written by Roberto Ierusalimschy
 */
 
@@ -19,7 +19,7 @@
 #include "lua.h"
 
 
-#define VERSION         "0.12"
+#define VERSION         "0.12.2-opt"
 
 
 #define PATTERN_T	"lpeg-pattern"
@@ -29,7 +29,7 @@
 /*
 ** compatibility with Lua 5.2
 */
-#if (LUA_VERSION_NUM == 502)
+#if (LUA_VERSION_NUM >= 502)
 
 #undef lua_equal
 #define lua_equal(L,idx1,idx2)  lua_compare(L,(idx1),(idx2),LUA_OPEQ)
@@ -56,7 +56,9 @@
 
 
 /* maximum number of rules in a grammar */
-#define MAXRULES        200
+#if !defined(MAXRULES)
+#define MAXRULES        1000
+#endif
 
 
 
@@ -79,6 +81,8 @@
 /* index, on Lua stack, for backtracking stack */
 #define stackidx(ptop)	((ptop) + 4)
 
+/* default maximum number of optimization passes */
+#define DEFAULT_OPT_PASSES 500
 
 
 typedef unsigned char byte;
@@ -107,6 +111,13 @@ typedef struct Charset {
 /* set 'b' bit in charset 'cs' */
 #define setchar(cs,b)   ((cs)[(b) >> 3] |= (1 << ((b) & 7)))
 
+#if defined(__GNUC__) || defined(__clang__)
+# define popcount(x) __builtin_popcount(x)
+#elif defined(_MSC_VER)
+# define popcount(x) __popcnt(x)
+#else
+# error "compiler not supported (popcnt support)"
+#endif
 
 /*
 ** in capture instructions, 'kind' of capture and its offset are
