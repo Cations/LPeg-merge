@@ -1,5 +1,5 @@
 LIBNAME = lpeg
-LUADIR = /usr/include/lua5.2
+LUADIR = /usr/include/lua5.1/
 
 COPT = -O2
 # COPT = -DLPEG_DEBUG -g
@@ -40,7 +40,7 @@ lpeg.so: $(FILES)
 
 $(FILES): makefile
 
-test: test.lua re-labels.lua lpeg.so
+test: test.lua re.lua lpeg.so
 	./test.lua
 
 clean:

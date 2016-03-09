@@ -1,4 +1,4 @@
-#!/usr/bin/env lua
+#!/usr/bin/env lua5.1
 
 -- $Id: test.lua,v 1.101 2013/04/12 16:30:33 roberto Exp $
 
@@ -1047,7 +1047,7 @@ checkeq(t, {'a', 'aa', 20, 'a', 'aaa', 'aaa'})
 -- Tests for 're' module
 -------------------------------------------------------------------
 
-local re = require "re-labels"
+local re = require "re"
 
 local match, compile = re.match, re.compile
 

@@ -21,7 +21,7 @@
 /* number of siblings for each tree */
 const byte numsiblings[] = {
   0, 0, 0,	/* char, set, any */
-  0, 0,		/* true, false */	
+  0, 0,		/* true, false */
   1,		/* rep */
   2, 2,		/* seq, choice */
   1, 1,		/* not, and */
@@ -1226,7 +1226,7 @@ int luaopen_lpeg (lua_State *L) {
   lua_pushnumber(L, MAXBACK);  /* initialize maximum backtracking */
   lua_setfield(L, LUA_REGISTRYINDEX, MAXSTACKIDX);
   luaL_register(L, NULL, metareg);
-  luaL_register(L, "lpeg-labels", pattreg);
+  luaL_register(L, "lpeg", pattreg);
   lua_pushvalue(L, -1);
   lua_setfield(L, -3, "__index");
   return 1;
