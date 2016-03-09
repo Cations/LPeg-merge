@@ -603,11 +603,15 @@ assert(not p:match(string.rep("011", 10001)))
 -- this grammar does need backtracking info.
 local lim = 10000
 p = m.P{ '0' * m.V(1) + '0' }
+if not lpeg_optimize then
 checkerr("stack overflow", m.match, p, string.rep("0", lim))
 m.setmaxstack(2*lim)
 checkerr("stack overflow", m.match, p, string.rep("0", lim))
 m.setmaxstack(2*lim + 4)
 assert(m.match(p, string.rep("0", lim)) == lim + 1)
+else
+	print "Skipping overflow tests"
+end
 
 -- this repetition should not need stack space (only the call does)
 p = m.P{ ('a' * m.V(1))^0 * 'b' + 'c' }

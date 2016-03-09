@@ -81,6 +81,10 @@
 /* index, on Lua stack, for backtracking stack */
 #define stackidx(ptop)	((ptop) + 4)
 
+#ifdef LPEG_OPTIMIZE
+/* default maximum number of optimization passes */
+#define DEFAULT_OPT_PASSES 500
+#endif /*LPEG_OPTIMIZE*/
 
 
 typedef unsigned char byte;
@@ -109,6 +113,15 @@ typedef struct Charset {
 /* set 'b' bit in charset 'cs' */
 #define setchar(cs,b)   ((cs)[(b) >> 3] |= (1 << ((b) & 7)))
 
+#ifdef LPEG_OPTIMIZE
+#	if defined(__GNUC__) || defined(__clang__)
+#		define popcount(x) __builtin_popcount(x)
+#	elif defined(_MSC_VER)
+#		define popcount(x) __popcnt(x)
+#	else
+#		error "compiler not supported (popcnt support)"
+#	endif /*popcount*/
+#endif /*LPEG_OPTIMIZE*/
 
 /*
 ** in capture instructions, 'kind' of capture and its offset are

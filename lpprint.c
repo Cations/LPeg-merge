@@ -51,11 +51,28 @@ static void printjmp (const Instruction *op, const Instruction *p) {
   printf("-> %d", (int)(p + (p + 1)->offset - op));
 }
 
+#ifdef LPEG_OPTIMIZE
+static void printvjmp(const Instruction *op, const Instruction *p) {
+  int i, offset=0;
+  const byte *st = (p+1)->buff;
+  printf("\n");
+  for(i=0; i <= UCHAR_MAX; i++) {
+    if (testchar(st, i)) {
+      ++offset;
+      printf("  '%c' -> %d\n", i, p + (p + CHARSETINSTSIZE + offset)->offset - op);
+    }
+  }
+  printf("   *  -> %d",  p + (p + CHARSETINSTSIZE)->offset - op);
+}
+#endif /*LPEG_OPTIMIZE*/
 
 void printinst (const Instruction *op, const Instruction *p) {
   const char *const names[] = {
     "any", "char", "set",
     "testany", "testchar", "testset",
+#ifdef LPEG_OPTIMIZE
+	"testvector",
+#endif /*LPEG_OPTIMIZE*/
     "span", "behind",
     "ret", "end",
     "choice", "jmp", "call", "open_call",
@@ -72,6 +89,12 @@ void printinst (const Instruction *op, const Instruction *p) {
       printf("'%c'", p->i.aux); printjmp(op, p);
       break;
     }
+#idef LPEG_OPTIMIZE
+    case ITestVector: {
+      printvjmp(op, p);
+      break;
+    }
+#endif /*LPEG_OPTIMIZE*/
     case IFullCapture: {
       printcapkind(getkind(p));
       printf(" (size = %d)  (idx = %d)", getoff(p), p->i.key);

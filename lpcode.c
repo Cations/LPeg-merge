@@ -5,6 +5,9 @@
 
 #include <limits.h>
 
+#ifdef LPEG_OPTIMIZE
+	#include <string.h>
+#endif  /*LPEG_OPTIMIZE*/
 
 #include "lua.h"
 #include "lauxlib.h"
@@ -415,6 +418,16 @@ int sizei (const Instruction *i) {
     case ITestChar: case ITestAny: case IChoice: case IJmp: case ICall:
     case IOpenCall: case ICommit: case IPartialCommit: case IBackCommit:
       return 2;
+#ifdef LPEG_OPTIMIZE
+    case ITestVector: { /* this one is dynamically sized */
+      int jumps=0, j;
+      const unsigned int* bitset = (const unsigned int*)((i+1)->buff);
+      for (j=0; j<(int)(CHARSETSIZE/sizeof(unsigned int)); j++) {
+        jumps += popcount(bitset[j]);
+      }
+      return jumps + CHARSETINSTSIZE + 1;
+    }
+#endif  /*LPEG_OPTIMIZE*/
     default: return 1;
   }
 }
@@ -532,8 +545,16 @@ static void jumptohere (CompileState *compst, int instruction) {
 ** test dominating it
 */
 static void codechar (CompileState *compst, int c, int tt) {
+#ifdef LPEG_OPTIMIZE
+  if (tt >= 0 && (
+        (getinstr(compst, tt).i.code == ITestChar &&
+         getinstr(compst, tt).i.aux == c) ||
+        (getinstr(compst, tt).i.code == ITestVector &&
+         testchar(getinstr(compst, tt+1).buff, c))))
+#else /*NOT LPEG_OPTIMIZE*/
   if (tt >= 0 && getinstr(compst, tt).i.code == ITestChar &&
                  getinstr(compst, tt).i.aux == c)
+#endif /*LPEG_OPTIMIZE*/
     addinstruction(compst, IAny, 0);
   else
     addinstruction(compst, IChar, c);
@@ -638,8 +659,8 @@ static void codebehind (CompileState *compst, TTree *tree) {
 
 /*
 ** Choice; optimizations:
-** - when p1 is headfail or
-** when first(p1) and first(p2) are disjoint, than
+** - when p1 is headfail
+** - when first(p1) and first(p2) are disjoint; than
 ** a character not in first(p1) cannot go to p1, and a character
 ** in first(p1) cannot go to p2 (at it is not in first(p2)).
 ** (The optimization is not valid if p1 accepts the empty string,
@@ -684,6 +705,198 @@ static void codechoice (CompileState *compst, TTree *p1, TTree *p2, int opt,
   }
 }
 
+#ifdef LPEG_OPTIMIZE
+#define getvjmpslot(compst, instr, slot) getinstr(compst, instr + CHARSETINSTSIZE + slot).offset
+/*
+** Vectorized choice; this will allow the VM to choose between multiple
+** characters in one go, without backtracking. If the choice cannot or should
+** not be vectorized, the function returns 0 and regular choice should be
+** generated.
+** Technically, the instruction records a unique destination for each possible
+** char (and one other for failure case). The instruction is coded as follows:
+**
+**                           /       destination buffer     \
+**  /--------*---------------*-------*--------*--------*-----\
+**  | ITest  |     BITSET    | fail  | 1st ch | 2nd ch | ... |
+**  | Vector | all set chars | offst | offset | offset | ... |
+**  \--------*---------------*-------*--------*--------*-----/
+** len:  CHARSETINSTSIZE     |  number of set bits in bitset
+**
+** All expected chars are set in bitset. It is followed by the failure
+** destination, that is where to jump if none of the expected chars is met.
+** If the char is in btset, then the corresponding destination is stored in
+** dest buffer at n-th slow where n is the number of set bits in bitset before
+** tested char (including itself). See popcount.
+*/
+
+typedef struct {
+    enum { DEST_NONE=0, DEST_TREE, DEST_OFFSET, DEST_ALIAS } kind;
+    union {
+        TTree *tree; /* node for codegen (pass 1) */
+        int jmp;     /* final jump offset, for patching (pass 2) */
+        int alias;   /* aliased destination, for non unique sets (pass 2) */
+    } val;
+    int instr;       /* first generated instruction offset */
+} Vectordest;
+
+typedef enum { VECT_ABORT, VECT_STOP, VECT_CONTINUE } Vectstatus;
+
+static Vectstatus vectorchoice_checktree (CompileState *compst, TTree *tree,
+                                          Vectordest *destinations, Charset *cs) {
+    Charset firstcs;
+    /* in sets, the code is generated only once, other chars jump to the sanme
+       destination. */
+    int fisrt_char = -1, i;
+
+    assert(tree->tag != TChoice);
+    memset(&firstcs, 0, sizeof(firstcs));
+    /* In case of a fullset in node, do not abort the whole vectorization,
+       just stop here and use fallfack if the taken branch fail somehow. */
+    if (getfirst(tree, fullset, &firstcs) != 0 ||
+        cs_equal(firstcs.cs, fullset->cs)) {
+        /* we can't vectorize anymore, run regular codegen from here */
+        return VECT_STOP;
+    }
+
+    for (i=0; i<=UCHAR_MAX; i++) {
+        if (testchar(firstcs.cs, i)) {
+            if (testchar(cs->cs, i)) return VECT_ABORT; /* redundant pattern */
+            if (fisrt_char == -1) {
+                destinations[i].kind = DEST_TREE;
+                destinations[i].val.tree = tree;
+                fisrt_char = i;
+            } else {
+                destinations[i].kind = DEST_ALIAS;
+                destinations[i].val.alias = fisrt_char;
+            }
+            setchar(cs->cs, i);
+            addinstruction(compst, (Opcode)0, 0);
+        }
+    }
+    return VECT_CONTINUE;
+}
+
+static int codevectorchoice (CompileState *compst, TTree *tree, int opt,
+                             const Charset *fl) {
+    int vector, offset=0, i, failpos, failjmp, failempty;
+    TTree *t;
+    Charset cs;
+    Vectordest destinations[UCHAR_MAX+1];
+
+    memset(destinations, 0, sizeof(destinations));
+    memset(&cs, 0, sizeof(cs));
+
+    vector = addinstruction(compst, ITestVector, 0);
+    addcharset(compst, cs.cs);
+    addinstruction(compst, (Opcode)0, 0); /* lookup failure destination */
+
+    for (t = tree; t->tag == TChoice; t = sib2(t)) {
+        switch(vectorchoice_checktree(compst, sib1(t), destinations, &cs)) {
+        case VECT_ABORT: return 0;
+        case VECT_STOP: goto generate;
+        case VECT_CONTINUE: offset++; break;
+        }
+    }
+
+    /* process last node too */
+    switch(vectorchoice_checktree(compst, t, destinations, &cs)) {
+    case VECT_ABORT: return 0;
+    default: offset++; break;
+    }
+
+generate:
+    /* the ITestVector may not be always a good idea if the number of choices
+       is small because the instruction is huge (~50 bytes) and quite heavy to
+       process for the VM. */
+    /*XXX: bench it a bit more scientifically (this depends on CPU, compiler, ...) */
+    if (offset <= 7) return 0;
+
+    /* install the final bitset */
+    loopset(j, getinstr(compst, vector+1).buff[j] = cs.cs[j]);
+
+    /* the fallback is generated first only because we need the address
+       before generating the other branches: this avoids more address
+       patching later. */
+    getvjmpslot(compst, vector, 0) = gethere(compst) - vector;
+    if (t == NULL) {
+        failpos = addinstruction(compst, IFail, 0);
+        failjmp = NOINST;
+        failempty = 0;
+    } else {
+        failpos = gethere(compst);
+        codegen(compst, t, opt, NOINST, fl);
+        failjmp = addoffsetinst(compst, IJmp);
+        failempty = t->tag == TTrue;
+    }
+
+    offset = 0;
+    /* generate code for each possible branch */
+    for(i=0; i<=UCHAR_MAX; i++) {
+        switch (destinations[i].kind) {
+        case DEST_NONE:
+            destinations[i].val.jmp = NOINST;
+            destinations[i].instr = NOINST;
+            break;
+        case DEST_TREE:
+            assert(destinations[i].val.tree != NULL);
+            ++offset;
+            destinations[i].instr =
+                getvjmpslot(compst, vector, offset) =
+                gethere(compst) - vector;
+            if (t == NULL || headfail(destinations[i].val.tree)) {
+                /* no possible fallback, IChoice is not necessary */
+                codegen(compst, destinations[i].val.tree, 0, vector, fl);
+                destinations[i].val.jmp = addoffsetinst(compst, IJmp);
+            }
+            else if (opt && failempty) {
+                /* p1? == IPartialCommit; p1 */
+                /* FIXME: what does it mean ??? */
+                jumptohere(compst, addoffsetinst(compst, IPartialCommit));
+                codegen(compst, destinations[i].val.tree, 1, NOINST, fullset);
+                destinations[i].val.jmp = addoffsetinst(compst, IJmp);
+            }
+            else {
+                int pchoice = addoffsetinst(compst, IChoice);
+                jumptothere(compst, pchoice, failpos);
+                codegen(compst, destinations[i].val.tree, failempty, vector, fl);
+                destinations[i].val.jmp = addoffsetinst(compst, ICommit);
+            }
+            break;
+        case DEST_ALIAS:
+            assert(destinations[i].val.alias < i);
+            ++offset;
+            destinations[i].instr =
+                getvjmpslot(compst, vector, offset) =
+                destinations[destinations[i].val.alias].instr;
+            destinations[i].val.jmp = NOINST;
+            break;
+        default:
+            assert(0);
+        }
+        destinations[i].kind = DEST_OFFSET;
+    }
+
+    /* finally, set all pending links to here */
+    jumptohere(compst, failjmp);
+    for(i=0; i<=UCHAR_MAX; i++) {
+        jumptohere(compst, destinations[i].val.jmp);
+    }
+
+    return 1;
+}
+
+/*
+** Generate possible vector-choice optimized choice.
+*/
+static void optcodechoice(CompileState *compst, TTree *tree, int opt,
+                          const Charset *fl) {
+    int pos = gethere(compst);
+    if (!codevectorchoice(compst, tree, opt, fl)) {
+        compst->ncode = pos; /* reset instruction buffer */
+        codechoice(compst, sib1(tree), sib2(tree), opt, fl);
+    }
+}
+#endif /*LPEG_OPTIMIZE*/
 
 /*
 ** And predicate
@@ -759,7 +972,11 @@ static void coderep (CompileState *compst, TTree *tree, int opt,
       /* L1: test (fail(p1)) -> L2; <p>; jmp L1; L2: */
       int jmp;
       int test = codetestset(compst, &st, 0);
+#idef LPEG_OPTIMIZE
+      codegen(compst, tree, opt, test, fullset);
+#else
       codegen(compst, tree, 0, test, fullset);
+#endif /*LPEG_OPTIMIZE*/
       jmp = addoffsetinst(compst, IJmp);
       jumptohere(compst, test);
       jumptothere(compst, jmp, test);
@@ -897,7 +1114,11 @@ static void codegen (CompileState *compst, TTree *tree, int opt, int tt,
     case TSet: codecharset(compst, treebuffer(tree), tt); break;
     case TTrue: break;
     case TFalse: addinstruction(compst, IFail, 0); break;
+#ifdef LPEG_OPTIMIZE
+    case TChoice: optcodechoice(compst, tree, opt, fl); break;
+#else
     case TChoice: codechoice(compst, sib1(tree), sib2(tree), opt, fl); break;
+#endif /*LPEG_OPTIMIZE*/
     case TRep: coderep(compst, sib1(tree), opt, fl); break;
     case TBehind: codebehind(compst, tree); break;
     case TNot: codenot(compst, sib1(tree)); break;

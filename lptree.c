@@ -6,6 +6,9 @@
 #include <ctype.h>
 #include <limits.h>
 #include <string.h>
+#ifdef LPEG_OPTIMIZE
+	#include <stdlib.h>
+#endif /*LPEG_OPTIMIZE*/
 
 
 #include "lua.h"
@@ -988,37 +991,37 @@ static int verifyerror (lua_State *L, int *passed, int npassed) {
 ** case; otherwise return 1 iff pattern is nullable.
 ** The return value is used to check sequences, where the second pattern
 ** is only relevant if the first is nullable.
-** Parameter 'nb' works as an accumulator, to allow tail calls in
-** choices. ('nb' true makes function returns true.)
+** Parameter 'nullable' works as an accumulator, to allow tail calls in
+** choices. ('nullable' true makes function returns true.)
 ** Assume ktable at the top of the stack.
 */
 static int verifyrule (lua_State *L, TTree *tree, int *passed, int npassed,
-                       int nb) {
+                       int nullable) {
  tailcall:
   switch (tree->tag) {
     case TChar: case TSet: case TAny:
     case TFalse:
-      return nb;  /* cannot pass from here */
+      return nullable;  /* cannot pass from here */
     case TTrue:
     case TBehind:  /* look-behind cannot have calls */
       return 1;
     case TNot: case TAnd: case TRep:
       /* return verifyrule(L, sib1(tree), passed, npassed, 1); */
-      tree = sib1(tree); nb = 1; goto tailcall;
+      tree = sib1(tree); nullable = 1; goto tailcall;
     case TCapture: case TRunTime:
-      /* return verifyrule(L, sib1(tree), passed, npassed, nb); */
+      /* return verifyrule(L, sib1(tree), passed, npassed, nullable); */
       tree = sib1(tree); goto tailcall;
     case TCall:
-      /* return verifyrule(L, sib2(tree), passed, npassed, nb); */
+      /* return verifyrule(L, sib2(tree), passed, npassed, nullable); */
       tree = sib2(tree); goto tailcall;
-    case TSeq:  /* only check 2nd child if first is nb */
+    case TSeq:  /* only check 2nd child if first is nullable */
       if (!verifyrule(L, sib1(tree), passed, npassed, 0))
-        return nb;
-      /* else return verifyrule(L, sib2(tree), passed, npassed, nb); */
+        return nullable;
+      /* else return verifyrule(L, sib2(tree), passed, npassed, nullable); */
       tree = sib2(tree); goto tailcall;
     case TChoice:  /* must check both children */
-      nb = verifyrule(L, sib1(tree), passed, npassed, nb);
-      /* return verifyrule(L, sib2(tree), passed, npassed, nb); */
+      nullable = verifyrule(L, sib1(tree), passed, npassed, nullable);
+      /* return verifyrule(L, sib2(tree), passed, npassed, nullable); */
       tree = sib2(tree); goto tailcall;
     case TRule:
       if (npassed >= MAXRULES)
@@ -1091,6 +1094,376 @@ static TTree *newgrammar (lua_State *L, int arg) {
 
 /* }====================================================== */
 
+#ifdef LPEG_OPTIMIZE
+/*
+** {======================================================
+** Tree optimizer
+** =======================================================
+*/
+
+typedef enum {
+  TREEOPT_MERGE_PREFIX,  /* merge choices when the first char is the same */
+  TREEOPT_REORDER_PATT,  /* reorder patterns in sequence of choices */
+  TREEOPT_FIX_OFFSETS,   /* fix relative offsets in calls */
+  TREEOPT_LAST           /* sentinel */
+} TreeoptKind;
+
+#define treeopt_ison(flags, opt) ((flags & (1 << opt)) != 0)
+
+typedef struct {
+  lua_State *L;
+  int enabled_opts;         /* bitflag of active optimizations */
+  int hits;                 /* applied optimizations count */
+  TTree *orig_base;         /* base address of base tree */
+  TTree *optim_base;        /* base address of optimized tree */
+  int optim_pos;            /* next free position in output tree (in TTree offsets) */
+  int optim_size;           /* current size of the output tree buffer (in TTree units) */
+  void *data[TREEOPT_LAST]; /* free data for optimizers */
+} TreeoptCtx;
+
+typedef struct {
+  int orig;
+  int optim;
+} TreeoptOffset;
+
+typedef int (*TreeoptVisitor)(TreeoptCtx *ctx, TTree *t);
+
+/* Node visitor. Generates the optimized tree in the buffer pointed out bt ctx.
+** This function must be called by optimizers to recurse optimization.
+** t is the current node in base tree.
+*/
+static void treeopt_visitor(TreeoptCtx *ctx, TTree *t);
+
+/*
+** utility functions
+*/
+
+/* if tree is a pattern that starts with a char, returns it and store the
+** sibling node (if any) in charsibling, or NULL if there is no sibling.
+** If tree is a TChoice(TSeq, other), the function will search one level
+** deeper. In that case the 'other' tree will be stored in othertree,
+** otherwise it will be NULL.
+** if tree does not start with a char, return -1.
+** This function only works on fully right-associative trees (i.e. run
+** correctassociativity before) !
+*/
+static int firstchar(TTree *tree, TTree **charsibling, TTree **othertree) {
+  *othertree = NULL;
+redo:
+  switch (tree->tag) {
+    case TChar:
+      *charsibling = NULL;
+      return tree->u.n;
+    case TChoice:
+      /* XXX: for now, this is the same as seq as we still honor the choice ordering
+       *      but I will add a flag later to drop it. */
+      *othertree = sib2(tree);
+      tree = sib1(tree);
+      assert(tree->tag != TChoice); /* assume right-associativity */
+      goto redo;
+    case TSeq:
+      /* we assume the tree is right-associative so if there is a char to find,
+       * it is on fist left node */
+      if (sib1(tree)->tag == TChar) {
+        *charsibling = sib2(tree);
+        return sib1(tree)->u.n;
+      }
+      /* fall through */
+    default:
+      /* other kind of leaf, give up */
+      *charsibling = NULL;
+      return -1;
+  }
+}
+
+/* fix relative offsets inside the tree that have been broken during the
+** various transformations. For this it needs a mapping from old offsets to
+** new ones. The array must be sorted by old offset ascending order.
+*/
+static int cmp_offsets(const void *x, const void *y) { return ((const TreeoptOffset*)x)->orig - ((const TreeoptOffset*)y)->orig; }
+
+static void fixoffsets(TreeoptCtx *ctx, TTree *t, int nrule) {
+ tailcall:
+  switch (t->tag) {
+    case TGrammar: return; /* sub-grammars are already fixed */
+    case TCall: {
+      TreeoptOffset key, *offset;
+      key.orig = t->u.ps;
+      offset = bsearch(&key, ctx->data[TREEOPT_FIX_OFFSETS], nrule, sizeof(TreeoptOffset), cmp_offsets);
+      assert(offset != NULL);
+      /* compute the relative offset */
+      t->u.ps = offset->optim - (t - ctx->optim_base);
+      assert(sib2(t)->tag == TRule);
+      break;
+    }
+  }
+
+  switch (numsiblings[t->tag]) {
+    case 1: /* fixoffsets(ctx, t, sib1(t)); */
+      t = sib1(t); goto tailcall;
+    case 2:
+      fixoffsets(ctx, sib1(t), nrule);
+      t = sib2(t); goto tailcall;  /* fixoffsets(ctx, t, sib2(t)); */
+    default: assert(numsiblings[t->tag] == 0); break;
+  }
+}
+
+/* simplified version of finalfix, only meant to fix right-associativity recursively. */
+static void correctassociativity_rec (TTree *t) {
+ tailcall:
+  if (t->tag == TSeq || t->tag == TChoice) {
+      correctassociativity(t);
+  }
+
+  switch (numsiblings[t->tag]) {
+    case 1: /* correctassociativity_rec(sib1(t)); */
+      t = sib1(t); goto tailcall;
+    case 2:
+      correctassociativity_rec(sib1(t));
+      t = sib2(t); goto tailcall;  /* correctassociativity_rec(sib2(t)); */
+    default: assert(numsiblings[t->tag] == 0); break;
+  }
+}
+
+static int node_slotwidth(TTree *t) {
+  return 1 + (t->tag == TSet ? bytes2slots(CHARSETSIZE) : 0);
+}
+
+static TTree* next_node(TreeoptCtx *ctx, int nslots) {
+  TTree *out;
+  if (ctx->optim_pos + nslots > ctx->optim_size) {
+    /* TODO: if this case actually happens, make a reallocatable buffer
+       (see reallocprog from lpcode) */
+    luaL_error(ctx->L, "not enough memory");
+  }
+
+  out = ctx->optim_base + ctx->optim_pos;
+  ctx->optim_pos += nslots;
+  return out;
+}
+
+static void set_sib2_to_here(TreeoptCtx *ctx, TTree *t) {
+  assert(t >= ctx->optim_base && t < ctx->optim_base + ctx->optim_pos);
+  assert(numsiblings[t->tag] == 2);
+  t->u.ps = ctx->optim_pos - (t - ctx->optim_base);
+}
+
+/*
+** optimizers: if optimization applies, the optimized nodes are generated and
+** the return is non-zero. If the optimization does not apply, 0 is returned
+** and the output tree is left untouched.
+*/
+
+/* check whether both patterns have the same start */
+static int prefix_merger(TreeoptCtx *ctx, TTree *t) {
+  TTree *leftsib, *rightsib, *othertree, *out, *toplevel_choice=NULL;
+  int leftchar, rightchar;
+
+  if (t->tag != TChoice) return 0;
+
+  leftchar = firstchar(sib1(t), &leftsib, &othertree);
+  assert(othertree == NULL); /* on right-associative tree, there should not be any other tree here */
+  rightchar = firstchar(sib2(t), &rightsib, &othertree);
+  if (leftchar < 0 || leftchar != rightchar) return 0;
+
+  /* same prefix: report choice on next node */
+  if (othertree != NULL) {
+    /* we have some other unrelated choice here, keep it on top of the tree. */
+    toplevel_choice = next_node(ctx, 1);
+    toplevel_choice->tag = TChoice; /* we will finish that node later */
+  }
+
+  /* TODO: there is another possible optimization here: if any (or both) of
+   *       siblings are NULL, the Seq/Choice node are useless */
+  out = next_node(ctx, 3);
+  out->tag = TSeq; out->u.ps = 2;
+  sib1(out)->tag = TChar;
+  sib1(out)->u.n = (byte)leftchar;
+  sib2(out)->tag = TChoice;
+
+  if (leftsib != NULL) {
+    treeopt_visitor(ctx, leftsib);
+    set_sib2_to_here(ctx, sib2(out));
+  } else {
+    next_node(ctx, 1)->tag = TTrue;
+    sib2(out)->u.ps = 2;
+  }
+
+  if (rightsib != NULL) {
+    treeopt_visitor(ctx, rightsib);
+  } else {
+    next_node(ctx, 1)->tag = TTrue;
+  }
+
+  /* finish tree patching if necessary */
+  if (othertree != NULL) {
+    set_sib2_to_here(ctx, toplevel_choice);
+    treeopt_visitor(ctx, othertree);
+  }
+  return 1;
+}
+
+/* FIXME: worst sorting method ever ! Still, it is simple and works for a PoC.
+ * It requires a huge number of passes to converge. It you want to optimize something, look here ! */
+static int choice_reorderer(TreeoptCtx *ctx, TTree *t) {
+  int leftchar, rightchar;
+  TTree *other, *out, *unused;
+
+  if (t->tag != TChoice) return 0;
+
+  /* XXX: this is redundant with prefix_merger */
+  leftchar = firstchar(sib1(t), &unused, &other);
+  rightchar = firstchar(sib2(t), &unused, &other);
+
+  if (leftchar < 0 || rightchar < 0 || leftchar <= rightchar) return 0;
+
+  out = next_node(ctx, 1);
+  memcpy(out, t, sizeof(TTree));
+  if (other == NULL) {
+    /* terminal choice: just swap the children */
+    treeopt_visitor(ctx, sib2(t));
+    set_sib2_to_here(ctx, out);
+    treeopt_visitor(ctx, sib1(t));
+  } else {
+    /* non-terminal choice: swap first two alternatives, and leave the rest */
+    treeopt_visitor(ctx, sib1(sib2(t)));
+    set_sib2_to_here(ctx, out);
+    out = next_node(ctx, 1);
+    out->tag = TChoice;
+    treeopt_visitor(ctx, sib1(t));
+    set_sib2_to_here(ctx, out);
+    treeopt_visitor(ctx, other);
+  }
+  return 1;
+}
+
+/* optimization break relative offsets used by grammars. Re-fix them. */
+static int grammar_fixer(TreeoptCtx *ctx, TTree *t) {
+  switch(t->tag) {
+    case TGrammar: {
+      /* keep mapping from old absolute offsets to new ones.
+         For now uses a static array, is a Lua table more efficient ? */
+      TreeoptOffset mapping[MAXRULES];
+      TTree *out = next_node(ctx, 1);
+      void *prevmapping = ctx->data[TREEOPT_FIX_OFFSETS];
+
+      memset(mapping, 0, sizeof(mapping));
+      ctx->data[TREEOPT_FIX_OFFSETS] = mapping;
+      memcpy(out, t, sizeof(TTree));
+      treeopt_visitor(ctx, sib1(t));
+      fixoffsets(ctx, sib1(out), t->u.n);
+      ctx->data[TREEOPT_FIX_OFFSETS] = prevmapping;
+      return 1;
+    }
+    case TRule: {
+      /* insert entry in mapping */
+      TreeoptOffset *entry;
+      assert(ctx->data[TREEOPT_FIX_OFFSETS] != NULL);
+      entry = ((TreeoptOffset*)ctx->data[TREEOPT_FIX_OFFSETS]) + t->cap;
+      entry->orig = t - ctx->orig_base;
+      entry->optim = ctx->optim_pos;
+      break; /* let the usual tree copy happen */
+    }
+    case TCall: {
+      /* replace relative offset to absolute one; the final relative offset
+         will be fixed by fixoffsets. */
+      TTree *out = next_node(ctx, 1);
+      assert(sib2(t)->tag == TRule);
+      memcpy(out, t, sizeof(TTree));
+      out->u.ps = sib2(t) - ctx->orig_base;
+      return 1;
+    }
+  }
+  return 0;
+}
+
+/* optimizer visitor table: each member of TreeoptKind must have its vistor
+** here (in the same order of declaration)
+*/
+static TreeoptVisitor treeopt_visitors[] = {
+  prefix_merger,
+  choice_reorderer,
+  grammar_fixer,
+};
+
+static void treeopt_visitor(TreeoptCtx *ctx, TTree *t) {
+  unsigned int i;
+  int node_slots;
+  TTree *out;
+  for (i = 0; i < sizeof(treeopt_visitors) / sizeof(TreeoptVisitor); i++) {
+    if (treeopt_visitors[i](ctx, t)) {
+      if (i != TREEOPT_FIX_OFFSETS) ctx->hits++;
+      return;
+    }
+  }
+
+  /* no match ? just copy the node and recurse */
+  node_slots = node_slotwidth(t);
+  out = next_node(ctx, node_slotwidth(t));
+  memcpy(out, t, node_slots * sizeof(TTree));
+  if (numsiblings[t->tag] >= 1) {
+    treeopt_visitor(ctx, sib1(t));
+    if (numsiblings[t->tag] == 2) {
+      set_sib2_to_here(ctx, out);
+      treeopt_visitor(ctx, sib2(t));
+    }
+  }
+}
+
+static int lp_optimize(lua_State *L) {
+  int size, i;
+  TTree *buffers[2];
+  TTree *tree = gettree(L, 1, &size);
+  int maxpass = luaL_optinteger(L, 2, DEFAULT_OPT_PASSES);
+  int enabled_opts = ~0; /* enable everything for now */
+  /* optimized trees are usually smaller than the base one, so original size
+     should be enough for storing the optimized tree. */
+  int buffer_size = size;
+
+  /* the optimization step relies on right-associativity */
+  lua_getuservalue(L, 1);  /* push 'ktable' (may be used by 'finalfix') */
+  finalfix(L, 0, NULL, tree);
+
+  /* we have a base buffer and an optimized one, switch buffers at each
+     optimization pass */
+  buffers[0] = newtree(L, buffer_size);
+  buffers[1] = newtree(L, buffer_size);
+
+  /* initialize buffer with original tree for first pass */
+  memcpy(buffers[0], tree, size * sizeof(TTree));
+
+  for (i=0; ; i++) {
+    TreeoptCtx ctx;
+    ctx.L = L;
+    ctx.enabled_opts = enabled_opts;
+    ctx.hits = 0;
+    ctx.orig_base = buffers[i % 2];
+    ctx.optim_base = buffers[(i+1) % 2];
+    ctx.optim_pos = 0;
+    ctx.optim_size = buffer_size;
+
+    treeopt_visitor(&ctx, ctx.orig_base);
+    correctassociativity_rec(ctx.optim_base);
+
+#if defined(DEBUG)
+    printf("pass=%04d; original=%d; optimized=%d; hits=%d\n", i+1, size, ctx.optim_pos, ctx.hits);
+#endif
+    if (ctx.hits == 0 || i >= maxpass) {
+      /* LPeg relies on lua_rawlen to get pattern length, but our optimized
+         buffer may contain free space. */
+      TTree *finaltree = newtree(L, ctx.optim_pos);
+      memcpy(finaltree, ctx.optim_base, ctx.optim_pos * sizeof(TTree*));
+      copyktable(L, 1); /* we still need to set the ktable of our optimized pattern */
+      return 1;
+    }
+
+    size = ctx.optim_pos;
+  }
+  assert(0);
+}
+
+/* }====================================================== */
+#endif /*LPEG_OPTIMIZE*/
 
 static Instruction *prepcompile (lua_State *L, Pattern *p, int idx) {
   lua_getuservalue(L, idx);  /* push 'ktable' (may be used by 'finalfix') */
@@ -1245,6 +1618,9 @@ static struct luaL_Reg pattreg[] = {
   {"ptree", lp_printtree},
   {"pcode", lp_printcode},
   {"match", lp_match},
+#ifdef LPEG_OPTIMIZE
+  {"optimize", lp_optimize},
+#endif /*LPEG_OPTIMIZE*/
   {"B", lp_behind},
   {"V", lp_V},
   {"C", lp_simplecapture},
