@@ -24,7 +24,7 @@
 /* number of siblings for each tree */
 const byte numsiblings[] = {
   0, 0, 0,	/* char, set, any */
-  0, 0,		/* true, false */	
+  0, 0,		/* true, false */
   1,		/* rep */
   2, 2,		/* seq, choice */
   1, 1,		/* not, and */
@@ -1531,9 +1531,18 @@ static int lp_match (lua_State *L) {
   lua_pushnil(L);  /* initialize subscache */
   lua_pushlightuserdata(L, capture);  /* initialize caplistidx */
   lua_getuservalue(L, 1);  /* initialize penvidx */
+#ifdef LPEG_FFP
+  size_t ffp = i; /* initialize the farthest fail position */
+  r = match(L, s, s + i, s + l, &ffp, code, capture, ptop);
+#else
   r = match(L, s, s + i, s + l, code, capture, ptop);
+#endif /*LPEG_FFP*/
   if (r == NULL) {
     lua_pushnil(L);
+#ifdef LPEG_FFP
+    if (ffp < l) ffp++; /* adjust the farthest fail position */
+    lua_pushinteger(L, ffp);
+#endif /*LPEG_FFP*/
     return 1;
   }
   return getcaptures(L, s, r, ptop);
@@ -1656,9 +1665,12 @@ static struct luaL_Reg metareg[] = {
   {NULL, NULL}
 };
 
+/* Hacky way to get a dynamic name */
+#define OPEN(x) int luaopen_ ## x (lua_State *L)
+#define LUA_OPEN(name) OPEN(name)
 
-int luaopen_lpeg (lua_State *L);
-int luaopen_lpeg (lua_State *L) {
+LUA_OPEN(LPEG_NAME);
+LUA_OPEN(LPEG_NAME) {
   luaL_newmetatable(L, PATTERN_T);
   lua_pushnumber(L, MAXBACK);  /* initialize maximum backtracking */
   lua_setfield(L, LUA_REGISTRYINDEX, MAXSTACKIDX);

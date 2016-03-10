@@ -97,6 +97,9 @@ static int cs_equal (const byte *cs1, const byte *cs2) {
   return 1;
 }
 
+/*
+** computes whether sets cs1 and cs2 are disjoint
+*/
 static int cs_disjoint (const Charset *cs1, const Charset *cs2) {
   loopset(i, if ((cs1->cs[i] & cs2->cs[i]) != 0) return 0;)
   return 1;
@@ -972,11 +975,7 @@ static void coderep (CompileState *compst, TTree *tree, int opt,
       /* L1: test (fail(p1)) -> L2; <p>; jmp L1; L2: */
       int jmp;
       int test = codetestset(compst, &st, 0);
-#ifdef LPEG_OPTIMIZE
-      codegen(compst, tree, opt, test, fullset);
-#else
       codegen(compst, tree, 0, test, fullset);
-#endif /*LPEG_OPTIMIZE*/
       jmp = addoffsetinst(compst, IJmp);
       jumptohere(compst, test);
       jumptothere(compst, jmp, test);

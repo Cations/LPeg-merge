@@ -53,9 +53,19 @@ typedef union Instruction {
 
 
 void printpatt (Instruction *p, int n);
+
+#ifdef LPEG_FFP
+int getposition (lua_State *L, int t, int i);
+
+const char *match (lua_State *L, const char *o, const char *s, const char *e,
+                   size_t *ffp, Instruction *op, Capture *capture, int ptop);
+int verify (lua_State *L, Instruction *op, const Instruction *p,
+            Instruction *e, int postable, int rule);
+void checkrule (lua_State *L, Instruction *op, int from, int to,
+                int postable, int rule);
+#else
 const char *match (lua_State *L, const char *o, const char *s, const char *e,
                    Instruction *op, Capture *capture, int ptop);
-
+#endif /*LPEG_FFP*/
 
 #endif
-

@@ -5,6 +5,7 @@ COPT = -O2
 # COPT = -DLPEG_DEBUG -g
 
 LPEG_OPTIMIZE = -DLPEG_OPTIMIZE
+LPEG_FFP = -DLPEG_FFP
 LPEG_NAME = -DLPEG_NAME=$(LIBNAME)
 
 CWARNS = -Wall -Wextra -pedantic \
@@ -25,7 +26,7 @@ CWARNS = -Wall -Wextra -pedantic \
 #	-Wunreachable-code \
 
 
-CFLAGS = $(CWARNS) $(COPT) $(LPEG_OPTIMIZE) $(LPEG_NAME) -std=c99 -I$(LUADIR) -fPIC
+CFLAGS = $(CWARNS) $(COPT) $(LPEG_OPTIMIZE) $(LPEG_NAME) $(LPEG_FFP) -std=c99 -I$(LUADIR) -fPIC
 CC = gcc
 
 FILES = lpvm.o lpcap.o lptree.o lpcode.o lpprint.o

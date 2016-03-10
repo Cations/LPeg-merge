@@ -144,8 +144,14 @@ static int removedyncap (lua_State *L, Capture *capture,
 /*
 ** Opcode interpreter
 */
+#ifdef LPEG_FFP
+const char *match (lua_State *L, const char *o, const char *s, const char *e,
+                   size_t *ffp, Instruction *op, Capture *capture, int ptop) {
+  const char *pos = s;
+#else
 const char *match (lua_State *L, const char *o, const char *s, const char *e,
                    Instruction *op, Capture *capture, int ptop) {
+#endif /*LPEG_FFP*/
   Stack stackbase[INITBACK];
   Stack *stacklimit = stackbase + INITBACK;
   Stack *stack = stackbase;  /* point to first empty slot in stack */
@@ -301,6 +307,13 @@ const char *match (lua_State *L, const char *o, const char *s, const char *e,
         /* go through */
       case IFail:
       fail: { /* pattern failed: try to backtrack */
+#ifdef LPEG_FFP
+        /* update the farthest fail position */
+        if (s > pos) {
+          pos = s;
+          *ffp = pos - o;
+        }
+#endif /*LPEG_FFP*/
         do {  /* remove pending calls */
           assert(stack > getstackbase(L, ptop));
           s = (--stack)->s;
@@ -331,7 +344,7 @@ const char *match (lua_State *L, const char *o, const char *s, const char *e,
             capsize = 2 * captop;
           }
           /* add new captures to 'capture' list */
-          adddyncaptures(s, capture + captop - n - 2, n, fr); 
+          adddyncaptures(s, capture + captop - n - 2, n, fr);
         }
         p++;
         continue;
@@ -376,5 +389,3 @@ const char *match (lua_State *L, const char *o, const char *s, const char *e,
 }
 
 /* }====================================================== */
-
-
