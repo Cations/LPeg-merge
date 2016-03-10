@@ -4,7 +4,8 @@ LUADIR = ../lua/
 COPT = -O2
 # COPT = -DLPEG_DEBUG -g
 
-OPTIMIZE = -DLPEG_OPTIMIZE
+LPEG_OPTIMIZE = -DLPEG_OPTIMIZE
+LPEG_NAME = -DLPEG_NAME=$(LIBNAME)
 
 CWARNS = -Wall -Wextra -pedantic \
 	-Waggregate-return \
@@ -17,36 +18,36 @@ CWARNS = -Wall -Wextra -pedantic \
 	-Wundef \
 	-Wwrite-strings \
 	-Wbad-function-cast \
-	-Wdeclaration-after-statement \
 	-Wmissing-prototypes \
 	-Wnested-externs \
 	-Wstrict-prototypes \
-# -Wunreachable-code \
+#	-Wdeclaration-after-statement \
+#	-Wunreachable-code \
 
 
-CFLAGS = $(CWARNS) $(COPT) $(OPTIMIZE) -std=c99 -I$(LUADIR) -fPIC
+CFLAGS = $(CWARNS) $(COPT) $(LPEG_OPTIMIZE) $(LPEG_NAME) -std=c99 -I$(LUADIR) -fPIC
 CC = gcc
 
 FILES = lpvm.o lpcap.o lptree.o lpcode.o lpprint.o
 
 # For Linux
 linux:
-	make lpeg.so "DLLFLAGS = -shared -fPIC"
+	make $(LIBNAME).so "DLLFLAGS = -shared -fPIC"
 
 # For Mac OS
 macosx:
-	make lpeg.so "DLLFLAGS = -bundle -undefined dynamic_lookup"
+	make $(LIBNAME).so "DLLFLAGS = -bundle -undefined dynamic_lookup"
 
-lpeg.so: $(FILES)
-	env $(CC) $(DLLFLAGS) $(FILES) -o lpeg.so
+$(LIBNAME).so: $(FILES)
+	env $(CC) $(DLLFLAGS) $(FILES) -o $(LIBNAME).so
 
 $(FILES): makefile
 
-test: test.lua re.lua lpeg.so
+test: test.lua re.lua $(LIBNAME).so
 	./test.lua
 
 clean:
-	rm -f $(FILES) lpeg.so
+	rm -f $(FILES) $(LIBNAME).so
 
 
 lpcap.o: lpcap.c lpcap.h lptypes.h
