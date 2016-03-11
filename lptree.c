@@ -1542,8 +1542,10 @@ static int lp_match (lua_State *L) {
 #ifdef LPEG_FFP
     if (ffp < l) ffp++; /* adjust the farthest fail position */
     lua_pushinteger(L, ffp);
+	return 2;
+#else /*NOT LPEG_FFP*/
+	return 1;
 #endif /*LPEG_FFP*/
-    return 1;
   }
   return getcaptures(L, s, r, ptop);
 }
